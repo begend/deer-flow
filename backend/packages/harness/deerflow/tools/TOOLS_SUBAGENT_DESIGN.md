@@ -366,3 +366,368 @@ sequenceDiagram
 - **扩展层**：setup_agent 支撑自定义 agent 初始化。
 
 该设计在可扩展性、可治理性与复杂任务吞吐之间实现了较好的工程平衡。
+
+---
+
+# Deferred Tool 机制与 Task Tool 机制详解
+
+## 一、Deferred Tool 机制
+
+### 1.1 设计背景与目标
+
+**核心问题**：当 MCP（Model Context Protocol）服务器提供大量工具时，如果所有工具的完整 schema 都传给 LLM，会占用大量上下文 token，导致：
+- 上下文膨胀
+- 成本增加
+- 模型选择困难
+
+**解决方案**：延迟加载机制 —— 工具在需要时才获取完整 schema。
+
+### 1.2 核心组件
+
+#### 1.2.1 DeferredToolRegistry（延迟工具注册表）
+
+```python
+class DeferredToolEntry:
+    name: str
+    description: str
+    tool: BaseTool  # 完整工具对象，仅在搜索匹配时返回
+
+class DeferredToolRegistry:
+    def __init__(self):
+        self._entries: list[DeferredToolEntry] = []
+
+    def register(self, tool: BaseTool) -> None:
+        """注册工具到延迟列表"""
+
+    def promote(self, names: set[str]) -> None:
+        """将工具从延迟状态晋升为活跃状态"""
+
+    def search(self, query: str) -> list[BaseTool]:
+        """按查询模式搜索延迟工具"""
+```
+
+**关键特性**：
+- 使用 `ContextVar` 而非全局变量，确保每个请求上下文独立
+- 支持三种查询模式：
+  - `select:name1,name2` — 精确选择
+  - `+keyword rest` — 名称必须包含关键词，再按其余部分评分
+  - 普通关键词/regex — 匹配名称和描述
+
+#### 1.2.2 DeferredToolFilterMiddleware（延迟工具过滤中间件）
+
+```python
+class DeferredToolFilterMiddleware(AgentMiddleware[AgentState]):
+    def wrap_model_call(self, request, handler):
+        # 从延迟注册表获取延迟工具名称
+        registry = get_deferred_registry()
+        deferred_names = {e.name for e in registry.entries}
+
+        # 过滤掉延迟工具，只保留活跃工具
+        active_tools = [
+            t for t in request.tools
+            if getattr(t, "name", None) not in deferred_names
+        ]
+
+        # 用过滤后的工具继续模型调用
+        return handler(request.override(tools=active_tools))
+```
+
+**作用时机**：在 `wrap_model_call` 阶段，即在模型调用前过滤工具列表。
+
+**关键设计**：
+- 只影响模型看到的工具 schema
+- 不影响 ToolNode 的实际执行能力
+- ToolNode 仍持有所有工具（包括延迟的）
+
+#### 1.2.3 tool_search 工具
+
+```python
+@tool
+def tool_search(query: str) -> str:
+    """获取延迟工具的完整 schema 定义"""
+    registry = get_deferred_registry()
+    matched_tools = registry.search(query)
+
+    # 转换为 OpenAI function 格式
+    tool_defs = [
+        convert_to_openai_function(t)
+        for t in matched_tools[:MAX_RESULTS]
+    ]
+
+    # 晋升匹配的工具，使其对后续模型调用可见
+    registry.promote({t.name for t in matched_tools})
+
+    return json.dumps(tool_defs, indent=2)
+```
+
+### 1.3 完整工作流程
+
+```
+Agent Build → get_available_tools → DeferredToolRegistry
+    ↓
+Prompt Builder → 读取 deferred names → 注入 <available-deferred-tools>
+    ↓
+DeferredToolFilterMiddleware → 过滤 tools → 仅传 active tools schema 给 LLM
+    ↓
+LLM 调用 tool_search(query) → 搜索 → promote → 返回完整 schema
+    ↓
+下一轮模型调用 → promoted tools 已不在 deferred → 可直接调用
+```
+
+### 1.4 配置与启用
+
+在 `config.yaml` 中启用：
+
+```yaml
+tool_search:
+  enabled: true  # 启用延迟工具加载
+```
+
+### 1.5 关键优势
+
+1. **上下文优化**：初始只发送工具名称列表，不发送完整 schema
+2. **按需加载**：工具只在需要时才获取完整定义
+3. **透明晋升**：一旦工具被搜索并使用，就自动晋升为活跃状态
+4. **并发安全**：使用 ContextVar 确保请求间隔离
+
+---
+
+## 二、Task Tool 机制
+
+### 2.1 设计目标
+
+**核心价值**：将复杂任务从主代理分离到子代理执行，实现：
+- 上下文隔离（避免主对话被污染）
+- 并行任务编排
+- 独立超时与状态管理
+
+### 2.2 核心组件
+
+#### 2.2.1 SubagentExecutor（子代理执行器）
+
+```python
+class SubagentExecutor:
+    def __init__(self, config, tools, parent_model,
+                 sandbox_state, thread_data, thread_id, trace_id):
+        self.config = config
+        self.tools = _filter_tools(tools, config.tools,
+                                   config.disallowed_tools)
+        self.trace_id = trace_id or str(uuid.uuid4())[:8]
+
+    def _create_agent(self):
+        """创建子代理实例"""
+        model = create_chat_model(model_name, thinking_enabled=False)
+        middlewares = build_subagent_runtime_middlewares(lazy_init=True)
+        return create_agent(model, self.tools, middlewares, ...)
+
+    def execute_async(self, task: str, task_id: str) -> str:
+        """后台异步执行任务"""
+        # 创建任务状态对象
+        result = SubagentResult(task_id=task_id, status=PENDING)
+
+        # 提交到线程池
+        def run_task():
+            result.status = RUNNING
+            try:
+                exec_result = self.execute(task, result_holder)
+                result.status = exec_result.status
+                result.result = exec_result.result
+            except Exception as e:
+                result.status = FAILED
+                result.error = str(e)
+
+        _scheduler_pool.submit(run_task)
+        return task_id
+```
+
+**状态机**：`PENDING → RUNNING → COMPLETED/FAILED/TIMED_OUT`
+
+**线程池设计**：
+- `_scheduler_pool`（3 workers）：调度执行任务
+- `_execution_pool`（3 workers）：实际运行子代理（支持超时）
+
+#### 2.2.2 task_tool 工具
+
+```python
+@tool("task", parse_docstring=True)
+async def task_tool(
+    runtime: ToolRuntime,
+    description: str,
+    prompt: str,
+    subagent_type: str,
+    tool_call_id: str,
+    max_turns: int | None = None,
+) -> str:
+    """将任务委派给专业子代理"""
+
+    # 1. 验证子代理类型
+    config = get_subagent_config(subagent_type)
+
+    # 2. 继承父级上下文
+    sandbox_state = runtime.state.get("sandbox")
+    thread_data = runtime.state.get("thread_data")
+    thread_id = runtime.context.get("thread_id")
+
+    # 3. 创建执行器并后台执行
+    executor = SubagentExecutor(config, tools, ...)
+    task_id = executor.execute_async(prompt, task_id=tool_call_id)
+
+    # 4. 轮询任务状态
+    writer = get_stream_writer()
+    writer({"type": "task_started", "task_id": task_id, ...})
+
+    while True:
+        result = get_background_task_result(task_id)
+
+        # 发送 AI 消息更新
+        if len(result.ai_messages) > last_message_count:
+            for msg in new_messages:
+                writer({"type": "task_running", "message": msg})
+
+        # 检查终态
+        if result.status == COMPLETED:
+            writer({"type": "task_completed", ...})
+            return f"Task Succeeded. Result: {result.result}"
+        elif result.status == FAILED:
+            writer({"type": "task_failed", ...})
+            return f"Task failed. Error: {result.error}"
+
+        await asyncio.sleep(5)
+```
+
+**关键设计**：
+- 使用 `tool_call_id` 作为 `task_id`，提高可追溯性
+- 后台轮询任务状态，无需 LLM 参与轮询
+- 通过 SSE 事件流式报告进度
+- 支持取消时的延迟清理
+
+#### 2.2.3 SubagentLimitMiddleware（子代理限制中间件）
+
+```python
+class SubagentLimitMiddleware(AgentMiddleware[AgentState]):
+    def __init__(self, max_concurrent: int = 3):
+        self.max_concurrent = _clamp_subagent_limit(max_concurrent)  # [2, 4]
+
+    def after_model(self, state, runtime):
+        messages = state.get("messages", [])
+        last_msg = messages[-1]
+
+        # 统计 task tool_calls
+        task_calls = [
+            tc for tc in last_msg.tool_calls
+            if tc.get("name") == "task"
+        ]
+
+        # 超限时截断
+        if len(task_calls) > self.max_concurrent:
+            truncated = task_calls[:self.max_concurrent]
+            updated_msg = last_msg.model_copy(
+                update={"tool_calls": truncated}
+            )
+            return {"messages": [updated_msg]}
+```
+
+**作用**：
+- 强制限制单轮响应中的 `task` 调用数量
+- 防止模型发起过多并行子代理
+- 与提示词中的软约束形成双层保护
+
+### 2.3 内置子代理类型
+
+#### 2.3.1 general-purpose
+
+```python
+# 配置
+tools: None  # 继承所有工具（除了 denylist）
+disallowed_tools: [task]  # 禁止递归
+system_prompt: "You are a capable agent for complex tasks..."
+max_turns: 20
+timeout_seconds: 900
+```
+
+**适用场景**：
+- 需要多步推理的复杂任务
+- 需要使用多种工具的研究任务
+- 需要探索和分析的任务
+
+#### 2.3.2 bash
+
+```python
+# 配置
+tools: [bash_tool, ls_tool, ...]  # 仅沙箱工具
+disallowed_tools: [task]
+system_prompt: "Command execution specialist..."
+```
+
+**适用场景**：
+- 纯命令执行任务
+- Git 操作、构建、测试、部署
+
+**安全限制**：
+- 仅在 `AioSandboxProvider` 或明确允许 host bash 时可用
+- 本地沙箱默认不暴露
+
+### 2.4 完整执行流程
+
+```
+User → Lead Agent → 模型规划并输出多个 task tool_calls
+    ↓
+SubagentLimitMiddleware → 截断超限 task_calls
+    ↓
+loop 每个保留的 task 调用:
+    task_tool → SubagentExecutor → 后台线程池
+    ↓
+    子代理执行 → 轮询状态 → 流式报告进度
+    ↓
+Lead Agent → 综合各子任务结果 → 返回给 User
+```
+
+### 2.5 Prompt 系统集成
+
+在系统提示词中动态生成子代理部分：
+
+```python
+def _build_subagent_section(max_concurrent: int) -> str:
+    return f"""
+<subagent_system>
+**🚀 SUBAGENT MODE ACTIVE**
+**⛔ HARD CONCURRENCY LIMIT: MAXIMUM {max_concurrent} `task` CALLS PER RESPONSE.**
+- If count ≤ {max_concurrent}: Launch all in this response
+- If count > {max_concurrent}: Pick the {max_concurrent} most important sub-tasks
+- Multi-batch execution: Turn 1 → Batch 1, Turn 2 → Batch 2, ...
+
+**Available Subagents:**
+- general-purpose: ANY non-trivial task
+- bash: Command execution specialist
+</subagent_system>
+"""
+```
+
+### 2.6 关键优势
+
+1. **上下文隔离**：子代理的对话不会污染主对话
+2. **并行执行**：多个子任务可同时运行
+3. **独立超时**：每个子代理有独立的超时控制
+4. **流式反馈**：实时报告子代理的 AI 消息
+5. **并发控制**：多层次限制机制（提示词 + 中间件）
+
+---
+
+## 三、两个机制的协同
+
+Deferred Tool 和 Task Tool 机制共同构成了 DeerFlow 的工具治理体系：
+
+| 维度 | Deferred Tool | Task Tool |
+|------|---------------|-----------|
+| **目的** | 优化工具加载 | 分离复杂任务 |
+| **时机** | 模型调用前 | 执行阶段 |
+| **机制** | 延迟加载 + 按需晋升 | 后台执行 + 轮询 |
+| **控制** | 过滤工具 schema | 限制并发数 |
+| **组件** | Registry + Middleware + tool_search | Executor + task_tool + LimitMiddleware |
+
+两者共同实现了：
+- **可扩展性**：支持大量工具而不影响性能
+- **可控性**：多层次限制保证系统稳定
+- **灵活性**：按需加载和任务分离
+
+这套设计在保持系统简洁的同时，为复杂的 AI Agent 应用提供了强大的工具治理和任务编排能力。
