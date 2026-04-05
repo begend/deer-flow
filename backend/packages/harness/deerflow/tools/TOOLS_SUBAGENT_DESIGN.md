@@ -45,6 +45,120 @@
 
 该机制减少上下文膨胀，并提升大量工具时的选择稳定性。
 
+### 2.3.1 触发条件与入口
+
+- 触发开关：`config.yaml -> tool_search.enabled: true`。
+- 配置模型：`ToolSearchConfig.enabled`。
+- 运行入口：`get_available_tools(...)` 在加载 MCP 工具后执行 deferred 注册。
+
+### 2.3.2 装配阶段详细流程
+
+在 `get_available_tools(...)` 中：
+
+1. 先 `reset_deferred_registry()`，避免上下文残留导致脏 registry。
+2. 正常获取 MCP 工具集合（缓存层 `get_cached_mcp_tools()`）。
+3. 若开启 `tool_search`：
+   - 新建 `DeferredToolRegistry`；
+   - 将 MCP 工具逐个 `register(tool)`；
+   - `set_deferred_registry(registry)`；
+   - 将 `tool_search` 工具加入 builtin tools。
+
+结果是：
+
+- ToolNode 仍持有完整工具对象（可执行能力不丢）；
+- 模型侧初始不拿到 deferred 工具 schema（减少上下文负担）。
+
+### 2.3.3 Prompt 注入与模型可见性
+
+系统提示词中会注入 `<available-deferred-tools>` 区块，列出 deferred 工具名：
+
+- 由 `get_deferred_tools_prompt_section()` 生成；
+- 仅在 `tool_search.enabled` 且 registry 非空时注入；
+- 内容只包含工具名，不包含参数 schema。
+
+这让模型知道“有哪些潜在工具”，但必须先调用 `tool_search` 才能获得可调用定义。
+
+### 2.3.4 中间件过滤机制
+
+`DeferredToolFilterMiddleware` 在 `wrap_model_call` 阶段执行：
+
+1. 从 `get_deferred_registry()` 读取 deferred 名称集合；
+2. 从 `request.tools` 中排除同名工具；
+3. 用 `request.override(tools=active_tools)` 继续调用。
+
+因此：
+
+- 过滤仅影响“模型绑定时可见 schema”；
+- 不影响底层 ToolNode 对全部工具的路由执行能力。
+
+### 2.3.5 tool_search 工具的检索与晋升
+
+`tool_search(query)` 是 deferred 模式下的 schema 发现器：
+
+- 支持三类查询：
+  - `select:name1,name2`（精确选择）
+  - `+keyword rest`（名称必含 keyword，再按 rest 评分）
+  - 普通关键词/regex（匹配 name + description）
+- 返回值：
+  - 匹配工具的 OpenAI function schema JSON 列表（最多 `MAX_RESULTS=5`）。
+- 关键动作：
+  - 对命中的工具执行 `registry.promote(names)`；
+  - 被 promote 后不再是 deferred，对后续模型调用可直接可见并可调用。
+
+### 2.3.6 并发隔离设计
+
+deferred registry 使用 `ContextVar`（而非模块级全局变量）：
+
+- 每个请求上下文独立 registry；
+- 异步并发请求互不污染；
+- sync 工具经线程执行时也能继承当前上下文副本。
+
+该设计避免了并发场景下“请求 A 把请求 B 的 deferred 工具误晋升/误重置”的问题。
+
+### 2.3.7 与 MCP 缓存的协同
+
+Deferred Tool Search 依赖 MCP 工具来源，而 MCP 本身有缓存与配置热更新：
+
+- `get_cached_mcp_tools()` 会在配置文件 mtime 变化时判 stale 并重置缓存；
+- 下一次 deferred 注册即基于最新 MCP 配置重建 registry。
+
+这保证了通过 Gateway 更新 MCP 配置后，LangGraph 侧 deferred 工具视图也能收敛到最新状态。
+
+### 2.3.8 端到端时序
+
+```mermaid
+sequenceDiagram
+    autonumber
+    participant A as Agent Build
+    participant T as get_available_tools
+    participant R as DeferredToolRegistry
+    participant P as Prompt Builder
+    participant F as DeferredToolFilterMiddleware
+    participant LLM as Model
+    participant S as tool_search
+
+    A->>T: 组装工具列表
+    T->>R: reset + register(MCP tools)
+    T-->>A: 返回 tools + tool_search
+
+    A->>P: apply_prompt_template
+    P->>R: 读取 deferred names
+    P-->>A: 注入 <available-deferred-tools>
+
+    A->>F: wrap_model_call(request.tools)
+    F->>R: 读取 deferred names
+    F-->>LLM: 仅传 active tools schema
+
+    LLM->>S: tool_search(query)
+    S->>R: search(query)
+    S->>R: promote(matched_names)
+    S-->>LLM: 返回 matched tool schemas(JSON)
+
+    A->>F: 下一轮 wrap_model_call
+    F->>R: promoted tools 已不在 deferred
+    F-->>LLM: promoted tools schema 可见并可直接调用
+```
+
 ## 2.4 工具执行治理
 
 工具调用不是裸执行，关键治理链路包括：
@@ -252,4 +366,3 @@ sequenceDiagram
 - **扩展层**：setup_agent 支撑自定义 agent 初始化。
 
 该设计在可扩展性、可治理性与复杂任务吞吐之间实现了较好的工程平衡。
-
