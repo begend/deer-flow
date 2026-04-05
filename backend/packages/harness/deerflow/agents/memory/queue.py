@@ -182,7 +182,7 @@ class MemoryUpdateQueue:
         with self._lock:
             return self._processing
 
-
+# 在 MemoryMiddleware 中使用
 # Global singleton instance
 _memory_queue: MemoryUpdateQueue | None = None
 _queue_lock = threading.Lock()
