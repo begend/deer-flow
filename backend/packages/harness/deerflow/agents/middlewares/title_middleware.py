@@ -20,7 +20,10 @@ class TitleMiddlewareState(AgentState):
 
 
 class TitleMiddleware(AgentMiddleware[TitleMiddlewareState]):
-    """Automatically generate a title for the thread after the first user message."""
+    """
+       Automatically generate a title for the thread after the first user message.
+      首轮对话后自动生成线程标题。
+    """
 
     state_schema = TitleMiddlewareState
 

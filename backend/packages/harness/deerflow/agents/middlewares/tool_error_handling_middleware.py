@@ -17,7 +17,9 @@ _MISSING_TOOL_CALL_ID = "missing_tool_call_id"
 
 
 class ToolErrorHandlingMiddleware(AgentMiddleware[AgentState]):
-    """Convert tool exceptions into error ToolMessages so the run can continue."""
+    """Convert tool exceptions into error ToolMessages so the run can continue.
+        在计划模式下补齐 todo 感知；当上下文截断导致 write_todos 调用不在窗口内时，注入提醒。
+    """
 
     def _build_error_message(self, request: ToolCallRequest, exc: Exception) -> ToolMessage:
         tool_name = str(request.tool_call.get("name") or "unknown_tool")

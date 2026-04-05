@@ -11,7 +11,10 @@ logger = logging.getLogger(__name__)
 
 
 class TokenUsageMiddleware(AgentMiddleware):
-    """Logs token usage from model response usage_metadata."""
+    """
+        Logs token usage from model response usage_metadata.
+        记录模型 token 使用量（input/output/total）到日志。
+    """
 
     @override
     def after_model(self, state: AgentState, runtime: Runtime) -> dict | None:

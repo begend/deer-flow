@@ -69,6 +69,8 @@ _HARD_STOP_MSG = "[FORCED STOP] Repeated tool calls exceeded the safety limit. P
 class LoopDetectionMiddleware(AgentMiddleware[AgentState]):
     """Detects and breaks repetitive tool call loops.
 
+    检测并打断重复工具调用死循环。
+
     Args:
         warn_threshold: Number of identical tool call sets before injecting
             a warning message. Default: 3.

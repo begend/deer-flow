@@ -21,6 +21,8 @@ class ThreadDataMiddlewareState(AgentState):
 class ThreadDataMiddleware(AgentMiddleware[ThreadDataMiddlewareState]):
     """Create thread data directories for each thread execution.
 
+    为当前 thread_id 计算/创建工作目录路径（workspace/uploads/outputs），写入 state.thread_data
+
     Creates the following directory structure:
     - {base_dir}/threads/{thread_id}/user-data/workspace
     - {base_dir}/threads/{thread_id}/user-data/uploads

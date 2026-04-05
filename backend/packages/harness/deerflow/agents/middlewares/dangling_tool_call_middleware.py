@@ -28,6 +28,8 @@ logger = logging.getLogger(__name__)
 class DanglingToolCallMiddleware(AgentMiddleware[AgentState]):
     """Inserts placeholder ToolMessages for dangling tool calls before model invocation.
 
+    修复“AIMessage 有 tool_calls 但缺 ToolMessage”的坏历史，避免下次模型调用报格式错误。
+
     Scans the message history for AIMessages whose tool_calls lack corresponding
     ToolMessages, and injects synthetic error responses immediately after the
     offending AIMessage so the LLM receives a well-formed conversation.

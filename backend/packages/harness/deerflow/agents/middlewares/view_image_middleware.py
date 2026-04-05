@@ -20,8 +20,9 @@ class ViewImageMiddlewareState(AgentState):
 
 
 class ViewImageMiddleware(AgentMiddleware[ViewImageMiddlewareState]):
-    """Injects image details as a human message before LLM calls when view_image tools have completed.
-
+    """
+    Injects image details as a human message before LLM calls when view_image tools have completed.
+    当 view_image 工具调用完成后，把图片内容（含 base64）注入到下一次模型输入，让模型“看见图”。
     This middleware:
     1. Runs before each LLM call
     2. Checks if the last assistant message contains view_image tool calls

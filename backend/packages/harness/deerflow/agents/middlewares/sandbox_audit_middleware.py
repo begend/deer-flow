@@ -74,6 +74,10 @@ def _classify_command(command: str) -> str:
 class SandboxAuditMiddleware(AgentMiddleware[ThreadState]):
     """Bash command security auditing middleware.
 
+    对 bash 工具做安全审计与风控分级（block/warn/pass）。
+
+    调用 handler -> 捕获普通异常 -> 构造错误 ToolMessage（含 tool 名称、异常类型、简化 detail）-> 返回给模型继续推理。
+
     For every ``bash`` tool call:
     1. **Command classification**: regex + shlex analysis grades commands as
        high-risk (block), medium-risk (warn), or safe (pass).

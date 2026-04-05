@@ -23,6 +23,8 @@ class ClarificationMiddlewareState(AgentState):
 class ClarificationMiddleware(AgentMiddleware[ClarificationMiddlewareState]):
     """Intercepts clarification tool calls and interrupts execution to present questions to the user.
 
+    拦截 ask_clarification 工具，把它变成“向用户提问并中断执行”的控制流。
+
     When the model calls the `ask_clarification` tool, this middleware:
     1. Intercepts the tool call before execution
     2. Extracts the clarification question and metadata

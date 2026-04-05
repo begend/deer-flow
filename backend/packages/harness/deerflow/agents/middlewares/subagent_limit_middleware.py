@@ -22,7 +22,10 @@ def _clamp_subagent_limit(value: int) -> int:
 
 
 class SubagentLimitMiddleware(AgentMiddleware[AgentState]):
-    """Truncates excess 'task' tool calls from a single model response.
+    """
+    Truncates excess 'task' tool calls from a single model response.
+
+    统计最后 AIMessage 的 task tool_calls -> 超限则截断超出的 calls -> 回写更新后的 AIMessage。
 
     When an LLM generates more than max_concurrent parallel task tool calls
     in one response, this middleware keeps only the first max_concurrent and

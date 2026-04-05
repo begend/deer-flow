@@ -23,6 +23,7 @@ logger = logging.getLogger(__name__)
 class DeferredToolFilterMiddleware(AgentMiddleware[AgentState]):
     """Remove deferred tools from request.tools before model binding.
 
+    限制单次模型响应中 task 子代理调用并发数（2~4 范围内）。
     ToolNode still holds all tools (including deferred) for execution routing,
     but the LLM only sees active tool schemas — deferred tools are discoverable
     via tool_search at runtime.

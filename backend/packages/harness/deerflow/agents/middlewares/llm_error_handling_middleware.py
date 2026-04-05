@@ -61,7 +61,10 @@ _AUTH_PATTERNS = (
 
 
 class LLMErrorHandlingMiddleware(AgentMiddleware[AgentState]):
-    """Retry transient LLM errors and surface graceful assistant messages."""
+    """
+        Retry transient LLM errors and surface graceful assistant messages.
+       模型调用容错层（重试、退避、用户可读降级消息）。
+    """
 
     retry_max_attempts: int = 3
     retry_base_delay_ms: int = 1000
