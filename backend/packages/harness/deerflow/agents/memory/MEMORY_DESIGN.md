@@ -70,15 +70,15 @@
 `create_empty_memory()` 的目标结构：
 
 - `version` / `lastUpdated`
-- `user`
+- `user` # 用户上下文
   - `workContext`
   - `personalContext`
   - `topOfMind`
-- `history`
+- `history` # 近期上下文
   - `recentMonths`
   - `earlierContext`
   - `longTermBackground`
-- `facts[]`
+- `facts[]` # 可计算事实（facts）
   - `id`
   - `content`
   - `category`（preference/knowledge/context/behavior/goal/correction）
@@ -132,7 +132,7 @@
 1. lead agent 构建系统提示词时调用 `_get_memory_context(agent_name)`。
 2. 检查 `enabled` 与 `injection_enabled`。
 3. 从存储层加载 memory，`format_memory_for_injection(...)` 格式化。
-4. 按 token 预算装配 `<memory>` 段，拼入最终系统提示词。
+4. 按 token 预算装配 `<memory>` 段，拼入最终系统提示词。 
 5. 模型在下一轮推理中使用这些长期记忆。
 
 ### 5.3 管理链路（API 运维）
@@ -248,3 +248,8 @@ sequenceDiagram
 - 与 `Gateway API`：提供人工治理入口，纠偏自动更新结果。
 - 与 `Agent`：支持 per-agent memory 命名空间，实现多角色记忆隔离。
 
+## 12. 总结
+- 记忆系统设计：用户上下文 + 近期上下文 + 可计算事实（facts）
+- 记忆更新：异步队列 + 并发控制 （生产链路）
+- 记忆注入：系统提示词 + 优化 token 预算 （消费链路）
+- 记忆管理：API 接口 + 数据库存储

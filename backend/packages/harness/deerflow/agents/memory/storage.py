@@ -94,7 +94,7 @@ class FileMemoryStorage(MemoryStorage):
 
         try:
             with open(file_path, encoding="utf-8") as f:
-                data = json.load(f)
+                data = json.load(f) # 返回全部的记忆内容
             return data
         except (json.JSONDecodeError, OSError) as e:
             logger.warning("Failed to load memory file: %s", e)
